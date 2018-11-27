@@ -7,6 +7,8 @@
  Készítette:
   Könnyü Máté
   Révész Levente
+ 
+ 2018-11-10
  */
 
 #include <xc.h>
@@ -26,8 +28,9 @@
 #define LED_G LATBbits.LATB12
 #define LED_B LATBbits.LATB14
 #define SW1 !PORTAbits.RA3
-#define ADATLAB PORTBbits.RB5
-#define CLKLAB PORTBbits.RB7
+#define ADATLAB PORTBbits.RB11  // RX láb
+#define CLKLAB PORTBbits.RB12   // TX láb
+#define KIMENET LATBbits.LATB6  // SDO1 láb
 
 // delay
 #define SYS_FREQ 79227500L
@@ -37,10 +40,14 @@
 // UART
 #define BAUDRATE 9600
 #define BRGVAL ((FCY/BAUDRATE)/16) - 1
-char * joe; // 101-es légió !
-int i;
-unsigned char readchar;
+char * lcd_buffer; // 101-es légió !
+int i, szamlalo, szamlalo2;
+char readchar;
 uint16_t maszk, data;
+uint64_t maszk64, data64, frame64;
+#define TMERET 33
+int data_tomb[TMERET], frame_tomb[TMERET];
+
 union {
     struct {
         uint16_t startbit:1;
@@ -63,25 +70,33 @@ const unsigned char hu_char[] = {
 0x05,0x0A,0x0E,0x11,0x11,0x11,0x0E,0x00, // öö
 };
 
-void initUART1(void);
 void initLCD(void);
 void refreshLCD(void);
-unsigned char getOddParity(unsigned char p); 
+uint8_t getOddParity(uint8_t p); 
 
-void __attribute__((__interrupt__, __auto_psv__)) _INT0Interrupt (void)
+void __attribute__((__interrupt__, __auto_psv__)) _INT1Interrupt (void)
 {
-    if (ADATLAB) {
-        data |= maszk;
+    KIMENET = !KIMENET;
+    szamlalo++;
+    if (ADATLAB) data64 |= maszk64;
+    if (maszk64 == 0x100000000) 
+    {   // 33. bit
+        frame64 = data64;
+        maszk64 = 1;
+        data64 = 0;
     }
-    if (!(maszk & 1<<10)){          // ha még nem készült el a 11. bit
-        maszk = maszk << 1;
+    else maszk64 = maszk64 << 1;
+    
+    data_tomb[szamlalo2++] = ADATLAB;
+    if (szamlalo2 == TMERET)
+    {
+        szamlalo2 = 0;
+        memset(frame_tomb, 0, TMERET);
+        for (i=0; i<TMERET; i++)
+            frame_tomb[i] = data_tomb[i];
+        memset(data_tomb, 0, TMERET);
     }
-    else {                          // elkészült a frame
-        frameunion.frame = data;
-        maszk = 0;
-        data = 0;
-    }
-    IFS0bits.INT0IF=0;
+    IFS1bits.INT1IF = 0;
 }
 
 int main(void) 
@@ -93,41 +108,52 @@ int main(void)
     RCONbits.SWDTEN=0;              // disable Watchdog Timer 
   
     TRISB=0x0fff;                   // b12..b15 LCD output
-                                    // b11 RX bemenet
+    TRISBbits.TRISB6 = 0;           // SDO1 (KIMENET) out
+    TRISBbits.TRISB11 = 1;          // RX (ADATLAB) Input
+    TRISBbits.TRISB12 = 1;          // TX (CLOCKLAB)Input
+ 
   // az osccon-hoz unlock kell ! bit1: lposcen legyen 1, bit6: iolock legyen 0
   //PPSUnLock
-    __builtin_write_OSCCONL(OSCCON & 0xbf); // bit6 0
+    __builtin_write_OSCCONL(OSCCON & 0xbf); // bit6 -> 0
+    __builtin_write_OSCCONL(OSCCON | 0x02); // bit1 -> 1
     // lábak átkonfigurálása ide jöhet
-    
+    RPINR0bits.INT1R = 8; // INT1 -> RP8 azaz 17. láb, SCL
   //PPSLock
-    __builtin_write_OSCCONL(OSCCON | 0x40); // bit6 1
-    
-  // INT0 interrupt
-    IEC0bits.INT0IE = 1;            // INT0 IRQ Enable
-    INTCON2bits.INT0EP = 1;         // Interrupt on negative edge
-    IPC0bits.INT0IP = 0b111;        // 7-es prioritás
+    __builtin_write_OSCCONL(OSCCON | 0x40); // bit6 -> 1
+  
+  // Analog funkciók tiltása
+    AD1PCFGL = 0x1FFF;
+  
+  // INT1 inicializálás 
+    IFS1bits.INT1IF = 0;            // IF törölve
+    INTCON2bits.INT1EP = 1;         // 1 = Interrupt on negative edge
+    IPC5bits.INT1IP = 0b111;        // 7-es prioritás
+    IEC1bits.INT1IE = 1;            // INT0 IRQ Enable
     
   // lcd - 2x16 karakter
-    joe =(char *)malloc(33); // heap size-t a linkerben állitani >=44
-    if (!joe) // nem sikerült malloc-olni 
+    lcd_buffer =(char *)malloc(33); // heap size-t a linkerben állitani >=44
+    if (!lcd_buffer) // nem sikerült malloc-olni 
     {
-        LED_R=1; // hiba.
+        LED_R=1;                    // hiba.
         while (1) Sleep();          // vége.
     }
-    memset(joe,0x20,32);            // feltöltés space-szel
+    memset(lcd_buffer,0x20,32);            // feltöltés space-szel
     initLCD();
-  //  LED_B=1;
-    strcpy(joe, "uMOGI v1.0 ready");
+    strcpy(lcd_buffer, "uMOGI v1.0 ready");
     refreshLCD();
-  // init kész, jöhet a feldolgozó végtelen cilkus  
+    
+    szamlalo = 0, szamlalo2 = 0;
+    maszk = 1, data = 0;
+    maszk64 = 1, data64 = 0, frame64 = 0;
+//    memset(data_tomb, 0, 33);
+//    memset(frame_tomb, 0, 33);
+    int data_tomb[33] = {0};
+    int frame_tomb[33] = {0};
+    KIMENET = 0;
+
     while (1)
     {      
-        memset(joe,0x20,32); // space-k
-        readchar = 'A';
-        if (getOddParity(frameunion.framebits.data) == frameunion.framebits.parity) 
-            readchar = frameunion.framebits.data;
-        else 
-            readchar = '?';         // Paritásbit hibás
+        memset(lcd_buffer,0x20,32); // space-k
         
 //        switch(readchar) {          // magyar karakterek cseréje
 //            case 'á': readchar = 0x00; break;
@@ -140,13 +166,14 @@ int main(void)
 //            case  ??: readchar = 0x07; break;
 //            case 'ö': readchar = 0xEF; break;
 //        }
+        sprintf(lcd_buffer, "sz:%i    ", szamlalo);
+        sprintf(lcd_buffer+16, "0x%x     ", frame64);
 
-        sprintf(joe+16, "0x%x -> %c", readchar, readchar);
-        joe[i]=0; i++; i&=0x0f;     // 0..15 közt valami szalad
-        refreshLCD();               // mig az lcd-t irjuk, bejon az uj adat
+        refreshLCD();
         __delay_ms(250);
     }
     return 0;
+    
 }
 
 // lcd. d4-d7 : port b12-b15. közös láb a ledekkel
@@ -170,13 +197,13 @@ void lcd_clock_e(char b,char rs) {
     LATBbits.LATB14=(b & 4)>>2;     // d6
     LATBbits.LATB15=(b & 8)>>3;     // d7
   // A lábakra (12,13,14,15) kirakjuk az adatot/utasítást
-    LCD_RS=rs;                      // rs kint
+    LCD_RS = rs;                      // rs kint
   // clock kezdödik
-    LCD_E=1;                        // e:high
+    LCD_E = 1;                        // e:high
     Nop(); Nop(); Nop(); Nop(); // 220-300 ns kell.
   // clock végzödik
-    LCD_E=0;                        // e:low
-    LATB=x;                         // ledek vissza
+    LCD_E = 0;                        // e:low
+    LATB = x;                         // ledek vissza
     __delay_us(40); // 40 us. 30-nál mágikus karakterek
 }
 
@@ -226,15 +253,29 @@ void refreshLCD(void)
   /* A joe[] tömb tartalmát kiírja az LCD-re */
   int i;
   lcd_data(0x80,0);                 // line 1 felsö sor
-  for (i=0; i<16; i++) lcd_data(joe[i],1);
+  for (i=0; i<16; i++) lcd_data(lcd_buffer[i],1);
   lcd_data(0xC0,0);                 // line 2 alsó sor
-  for (i=16; i<32; i++) lcd_data(joe[i],1);
+  for (i=16; i<32; i++) lcd_data(lcd_buffer[i],1);
 }
 
-unsigned char getOddParity(unsigned char p) 
-     { 
-      p = p ^ (p >> 4 | p << 4); 
-      p = p ^ (p >> 2); 
-      p = p ^ (p >> 1); 
-      return ~p & 1; 
-     } 
+uint8_t getOddParity(uint8_t p) 
+{ 
+  p = p ^ (p >> 4 | p << 4); 
+  p = p ^ (p >> 2); 
+  p = p ^ (p >> 1); 
+  return ~p & 1; 
+} 
+
+//void __attribute__((__interrupt__, __auto_psv__)) _INT1Interrupt (void)
+//{
+//    KIMENET = !KIMENET;
+//    maszk = maszk<<1;
+//    szamlalo++;
+//    if (ADATLAB) data |= maszk;
+//    if (maszk == 0x2000) {
+//        frameunion.frame = data;
+//        maszk = 1;
+//        data = 0;
+//    }
+//    IFS1bits.INT1IF = 0;
+//}
