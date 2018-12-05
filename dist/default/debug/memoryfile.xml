@@ -1,18 +1,18 @@
 <?xml version="1.0" encoding="UTF-8"?>
 
 <project>
-  <executable name="dist/default/production/Mikrovezerlok-Keyboard.X.production.elf">
+  <executable name="dist/default/debug/Mikrovezerlok-Keyboard.X.debug.elf">
     <memory name="data">
       <units>bytes</units>
       <length>8192</length>
-      <used>202</used>
-      <free>7990</free>
+      <used>298</used>
+      <free>7894</free>
     </memory>
     <memory name="program">
       <units>bytes</units>
       <length>131328</length>
-      <used>8991</used>
-      <free>122337</free>
+      <used>6651</used>
+      <free>124677</free>
     </memory>
   </executable>
 </project>
